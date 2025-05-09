@@ -7,21 +7,52 @@ from sklearn.preprocessing import StandardScaler
 import numpy as np
 from model import BloodTransfusionModel
 import matplotlib.pyplot as plt
+import os
+from PIL import Image
 
-def train_model(X, y, batch_size=32, epochs=100, learning_rate=0.001):
-    # Convert data to PyTorch tensors
-    X = torch.FloatTensor(X)
-    y = torch.LongTensor(y)
-    
-    # Split data into train and validation sets
-    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
-    
-    # Create data loaders
-    train_dataset = TensorDataset(X_train, y_train)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_dataset = TensorDataset(X_val, y_val)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size)
-    
+def manage_images(image_dir):
+    # List all PNG files where image_dir is the directory to the image folder
+    image_files = [f for f in os.listdir(image_dir) if f.endswith('.png')]
+
+    images = []
+    for image_file in image_files:
+        image_path = os.path.join(image_dir, image_file)
+
+        # Load image and convert to tensor
+        image = Image.open(image_path)
+
+        # Convert PIL image to numpy array, normalize to [0,1], and convert to tensor
+        image_tensor = torch.FloatTensor(np.array(image)) / 255.0
+
+        # Add channel dimension if image is grayscale
+        if len(image_tensor.shape) == 2:
+            image_tensor = image_tensor.unsqueeze(0)
+        
+        # Remove channel and batch dimensions before flattening
+        image_tensor = image_tensor.flatten()
+
+        # Resize or truncate/pad to exactly 11 elements
+        if image_tensor.numel() > 11:
+            image_tensor = image_tensor[:11]
+        elif image_tensor.numel() < 11:
+            # Pad with zeros if needed
+            padding = torch.zeros(11 - image_tensor.numel())
+            image_tensor = torch.cat([image_tensor, padding])
+
+        # Add batch dimension
+        image_tensor = image_tensor.unsqueeze(0)
+        images.append(image_tensor)
+
+    # Stack all tensors along the batch dimension
+    return torch.cat(images, dim=0)
+
+def load_dataset(images_dir, masks_dir):
+    # Load images and masks
+    X = manage_images(images_dir)
+    y = manage_images(masks_dir)
+    return X, y
+
+def train_model(train_loader, val_loader, batch_size=32, epochs=100, learning_rate=0.001):
     # Initialize model
     model = BloodTransfusionModel()
     criterion = nn.CrossEntropyLoss()
@@ -36,6 +67,9 @@ def train_model(X, y, batch_size=32, epochs=100, learning_rate=0.001):
     train_accs = []
     val_accs = []
     
+    # Gradient scaler for mixed precision training
+    scaler = torch.cuda.amp.GradScaler()
+    
     # Training loop
     for epoch in range(epochs):
         model.train()
@@ -45,18 +79,15 @@ def train_model(X, y, batch_size=32, epochs=100, learning_rate=0.001):
         
         for batch_X, batch_y in train_loader:
             optimizer.zero_grad()
-            outputs = model(batch_X)
-            loss = criterion(outputs, batch_y)
-            loss.backward()
-            
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
-            optimizer.step()
+            with torch.cuda.amp.autocast():
+                outputs = model(batch_X)
+                loss = criterion(outputs, batch_y)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             
             train_loss += loss.item()
             _, predicted = torch.max(outputs.data, 1)
-            train_total += batch_y.size(0)
             train_correct += (predicted == batch_y).sum().item()
         
         # Validation
@@ -96,6 +127,7 @@ def train_model(X, y, batch_size=32, epochs=100, learning_rate=0.001):
             print(f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%')
             print(f'Learning Rate: {optimizer.param_groups[0]["lr"]:.6f}')
             print('-' * 50)
+            torch.save(model.state_dict(), f'checkpoint_epoch_{epoch+1}.pth')
     
     # Plot training history
     plt.figure(figsize=(12, 4))
@@ -122,22 +154,73 @@ def train_model(X, y, batch_size=32, epochs=100, learning_rate=0.001):
     
     return model, train_losses, val_losses, train_accs, val_accs
 
-if __name__ == "__main__":
-    # Load and preprocess your data here
-    # X = ...
-    # y = ...
+def test_model(model, test_loader):
+    model.eval()
+    test_loss = 0
+    test_correct = 0
+    test_total = 0
+    criterion = nn.CrossEntropyLoss()
     
-    # Scale the features
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    # Lists to store predictions and ground truth for visualization
+    all_predictions = []
+    all_targets = []
+    
+    with torch.no_grad():
+        for batch_X, batch_y in test_loader:
+            outputs = model(batch_X)
+            loss = criterion(outputs, batch_y)
+            test_loss += loss.item()
+            
+            _, predicted = torch.max(outputs.data, 1)
+            test_total += batch_y.size(0)
+            test_correct += (predicted == batch_y).sum().item()
+            
+            # Store predictions and targets for visualization
+            all_predictions.extend(predicted.cpu().numpy())
+            all_targets.extend(batch_y.cpu().numpy())
+    
+    # Calculate final metrics
+    test_loss = test_loss / len(test_loader)
+    test_acc = 100 * test_correct / test_total
+    
+    print('\nTest Results:')
+    print(f'Test Loss: {test_loss:.4f}')
+    print(f'Test Accuracy: {test_acc:.2f}%')
+    
+    return test_loss, test_acc
+
+if __name__ == "__main__":
+    train_images_dir = os.path.join('datasets', 'train', 'images')
+    val_images_dir = os.path.join('datasets', 'val', 'images')
+    test_images_dir = os.path.join('datasets', 'test', 'images')
+
+    train_masks_dir = os.path.join('datasets', 'train', 'masks')
+    val_masks_dir = os.path.join('datasets', 'val', 'masks')
+    test_masks_dir = os.path.join('datasets', 'test', 'masks')
+
+    # Load datasets
+    X_train, y_train = load_dataset(train_images_dir, train_masks_dir)
+    X_val, y_val = load_dataset(val_images_dir, val_masks_dir)
+    X_test, y_test = load_dataset(test_images_dir, test_masks_dir)
+    
+    # Create data loaders
+    train_dataset = TensorDataset(X_train, y_train)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    val_dataset = TensorDataset(X_val, y_val)
+    val_loader = DataLoader(val_dataset, batch_size=64)
+    test_dataset = TensorDataset(X_test, y_test)
+    test_loader = DataLoader(test_dataset, batch_size=64)
     
     # Train the model
     model, train_losses, val_losses, train_accs, val_accs = train_model(
-        X_scaled, y,
-        batch_size=64,  # Increased batch size
+        train_loader, val_loader,
+        batch_size=64,
         epochs=100,
         learning_rate=0.001
     )
     
-    # Save the model
-    torch.save(model.state_dict(), 'blood_transfusion_model.pth') 
+    # Test the model
+    test_loss, test_acc = test_model(model, test_loader) 
+
+    #save model after test
+    torch.save(model.state_dict(), "final_bloodTransfusionModel.pth")
