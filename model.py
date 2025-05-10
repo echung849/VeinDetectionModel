@@ -3,53 +3,64 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class BloodTransfusionModel(nn.Module):
-    def __init__(self, input_size=11, hidden_size=64, num_classes=2):
+    def __init__(self, num_channels=1, num_classes=2):
         super(BloodTransfusionModel, self).__init__()
         
-        # Input layer with batch normalization
-        self.input_bn = nn.BatchNorm1d(input_size)
+        # Convolutional layers
+        self.conv1 = nn.Conv2d(num_channels, 32, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(32)
+        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
         
-        # First hidden layer
-        self.fc1 = nn.Linear(input_size, hidden_size)
-        self.bn1 = nn.BatchNorm1d(hidden_size)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(64)
+        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
         
-        # Second hidden layer
-        self.fc2 = nn.Linear(hidden_size, hidden_size)
-        self.bn2 = nn.BatchNorm1d(hidden_size)
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm2d(128)
+        self.pool3 = nn.MaxPool2d(kernel_size=2, stride=2)
         
-        # Third hidden layer
-        self.fc3 = nn.Linear(hidden_size, hidden_size // 2)
-        self.bn3 = nn.BatchNorm1d(hidden_size // 2)
+        # Calculate output size after convolutions (depends on input image size)
+        # For example, if input is 224x224:
+        # After 3 pooling layers: 224 -> 112 -> 56 -> 28
+        # So feature map size would be 28x28 with 128 channels
+        self.fc_input_size = 128 * 28 * 28  # Adjust based on your input image size
         
-        # Output layer
-        self.fc4 = nn.Linear(hidden_size // 2, num_classes)
+        # Fully connected layers
+        self.fc1 = nn.Linear(self.fc_input_size, 512)
+        self.fc_bn1 = nn.BatchNorm1d(512)
+        self.fc2 = nn.Linear(512, num_classes)
         
-        # Dropout for regularization
         self.dropout = nn.Dropout(0.3)
-        
+    
     def forward(self, x):
-        # Input normalization
-        x = self.input_bn(x)
+        # Input shape: [batch_size, channels, height, width]
         
-        # First hidden layer with ReLU and dropout
-        x = self.fc1(x)
+        # First convolutional block
+        x = self.conv1(x)
         x = self.bn1(x)
         x = F.relu(x)
-        x = self.dropout(x)
+        x = self.pool1(x)
         
-        # Second hidden layer with ReLU and dropout
-        x = self.fc2(x)
+        # Second convolutional block
+        x = self.conv2(x)
         x = self.bn2(x)
         x = F.relu(x)
-        x = self.dropout(x)
+        x = self.pool2(x)
         
-        # Third hidden layer with ReLU and dropout
-        x = self.fc3(x)
+        # Third convolutional block
+        x = self.conv3(x)
         x = self.bn3(x)
         x = F.relu(x)
+        x = self.pool3(x)
+        
+        # Flatten
+        x = x.view(x.size(0), -1)
+        
+        # Fully connected layers
+        x = self.fc1(x)
+        x = self.fc_bn1(x)
+        x = F.relu(x)
         x = self.dropout(x)
+        x = self.fc2(x)
         
-        # Output layer
-        x = self.fc4(x)
-        
-        return x 
+        return x
