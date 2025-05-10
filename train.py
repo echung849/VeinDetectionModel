@@ -10,31 +10,45 @@ import matplotlib.pyplot as plt
 import os
 from PIL import Image
 
-def manage_images(image_dir):
-    # List all PNG files where image_dir is the directory to the image folder
-    image_files = [f for f in os.listdir(image_dir) if f.endswith('.png')]
-
+def load_dataset(images_dir, masks_dir, is_segmentation=True):
+    # Load images
+    image_files = [f for f in os.listdir(images_dir) if f.endswith('.png')]
+    
     images = []
+    masks = []
+    
     for image_file in image_files:
-        image_path = os.path.join(image_dir, image_file)
-        # Load image and convert to tensor
-        image = Image.open(image_path)
-        # Convert PIL image to numpy array, normalize to [0,1], and convert to tensor
+        # Load image
+        image_path = os.path.join(images_dir, image_file)
+        image = Image.open(image_path).convert('L')  # Convert to grayscale
         image_tensor = torch.FloatTensor(np.array(image)) / 255.0
-        # Add channel dimension if image is grayscale
-        if len(image_tensor.shape) == 2:
-            image_tensor = image_tensor.unsqueeze(0)
-        # Add batch dimension
-        image_tensor = image_tensor.unsqueeze(0)
+        image_tensor = image_tensor.unsqueeze(0)  # Add channel dimension [1, H, W]
         images.append(image_tensor)
-
-    # Stack all tensors along the batch dimension
-    return torch.cat(images, dim=0)
-
-def load_dataset(images_dir, masks_dir):
-    # Load images and masks
-    X = manage_images(images_dir)
-    y = manage_images(masks_dir)
+        
+        # Load corresponding mask
+        mask_path = os.path.join(masks_dir, image_file)
+        mask = Image.open(mask_path).convert('L')
+        
+        if is_segmentation:
+            # For segmentation: keep mask as image
+            mask_tensor = torch.FloatTensor(np.array(mask)) / 255.0
+            mask_tensor = mask_tensor.unsqueeze(0)  # Add channel dimension [1, H, W]
+            masks.append(mask_tensor)
+        else:
+            # For classification: convert mask to class index
+            # Assuming binary classification based on presence of white pixels
+            mask_np = np.array(mask)
+            class_index = 1 if np.sum(mask_np) > 0 else 0
+            masks.append(class_index)
+    
+    # Stack images
+    X = torch.stack(images)
+    
+    if is_segmentation:
+        y = torch.stack(masks)
+    else:
+        y = torch.LongTensor(masks)
+    
     return X, y
 
 def train_model(train_loader, val_loader, batch_size=32, epochs=100, learning_rate=0.001):
